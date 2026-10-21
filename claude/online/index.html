@@ -29,7 +29,7 @@
 <body>
 <header>
   <h1><span>✻</span> Claude 風チャット</h1>
-  <span class="badge">道具+知識+ネット検索・APIキー不要</span>
+  <span class="badge">道具+知識+論文検索・APIキー不要</span>
   <button id="reset">リセット</button>
 </header>
 <main id="log" aria-live="polite"></main>
@@ -39,6 +39,8 @@
 </form>
 
 <script src="tools.js"></script>
+<script src="science.js"></script>
+<script src="papers.js"></script>
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
@@ -111,7 +113,7 @@ const local = [
   [/^(こんにちは|こんばんは|おはよう|はじめまして|やあ|hello|hi)[!！。]?$/i, () => pick(["こんにちは！何を調べましょうか？", "こんにちは。気になることを聞いてください。"])],
   [/ありがとう|感謝|助かった/, () => "どういたしまして！"],
   [/あなた.*(誰|だれ|何者)|自己紹介/, () => "ブラウザ上で動く Claude 風のボットです。本物のClaudeやAIモデルではなく、Wikipedia と Open-Meteo をネットで検索して答える仕組みです。答えには出典URLと取得日を付けます。"],
-  [/できること|使い方|ヘルプ|help/i, () => "【ネットで調べる】「光合成とは」「大阪の天気」\n【計算】「2^10」「sqrt(144)+1」「360を素因数分解」「12と18の最大公約数」「10の階乗」「200の15%」「5000円の20%オフ」\n【単位】「5kmは何マイル」「100°Fは何℃」「1GBは何MB」「1坪は何平方メートル」\n【日付】「2026/12/25は何曜日」「100日後」「令和7年は西暦何年」「2026年の干支」「1990年5月1日生まれは何歳」\n【祝日】「2026年の祝日」「2026/5/6は祝日？」「次の祝日はいつ」\n【世界時計】「ニューヨークは今何時」\n【文字】「「こんにちは」の文字数」「base64エンコード「…」」「sha256「abc」」「パスワードを16桁で生成」「uuid」\n【進数】「255を16進数に」\n【知識】「原子番号26」「愛知県の県庁所在地」「フランスの首都」「404とは」「goの過去分詞」「2026をローマ数字に」「光速はいくつ」「大さじ2は何ml」「11月の和風月名」\n【プログラミング】「reduceとは」「git rebase」「Pythonのリスト内包表記」「flexbox」"],
+  [/できること|使い方|ヘルプ|help/i, () => "【ネットで調べる】「光合成とは」「大阪の天気」\n【計算】「2^10」「sqrt(144)+1」「360を素因数分解」「12と18の最大公約数」「10の階乗」「200の15%」「5000円の20%オフ」\n【単位】「5kmは何マイル」「100°Fは何℃」「1GBは何MB」「1坪は何平方メートル」\n【日付】「2026/12/25は何曜日」「100日後」「令和7年は西暦何年」「2026年の干支」「1990年5月1日生まれは何歳」\n【祝日】「2026年の祝日」「2026/5/6は祝日？」「次の祝日はいつ」\n【物理・学問】「2kgの物体が3m/sで動くときの運動エネルギー」「地球の脱出速度」「12Vで4Ωの電流」「x^3+2x を微分」「x^2-5x+6=0」「2,4,4,4,5,5,7,9の平均と標準偏差」「10C3」「シュレーディンガー方程式」「エントロピーとは」\n【論文】「quantum error correctionの論文を探して」「最新のブラックホールの論文」「10.7717/peerj.4375 を調べて」\n【世界時計】「ニューヨークは今何時」\n【文字】「「こんにちは」の文字数」「base64エンコード「…」」「sha256「abc」」「パスワードを16桁で生成」「uuid」\n【進数】「255を16進数に」\n【知識】「原子番号26」「愛知県の県庁所在地」「フランスの首都」「404とは」「goの過去分詞」「2026をローマ数字に」「光速はいくつ」「大さじ2は何ml」「11月の和風月名」\n【プログラミング】「reduceとは」「git rebase」「Pythonのリスト内包表記」「flexbox」"],
   [/^(今|いま)?何時|時刻/, () => { const d = new Date(); return `今は ${pad(d.getHours())}:${pad(d.getMinutes())} です。`; }],
   [/何日|日付|今日は|曜日/, () => { const d = new Date(); return `今日は ${d.getFullYear()}年${d.getMonth()+1}月${d.getDate()}日（${"日月火水木金土"[d.getDay()]}曜日）です。`; }],
   [/サイコロ|ダイス/, () => `🎲 ${1 + Math.floor(Math.random() * 6)} が出ました。`],
@@ -130,6 +132,15 @@ function topicOf(t) {
 
 async function reply(text) {
   const t = text.trim();
+  // 物理の公式計算・微積分・統計・学術概念辞典。出典は、Wikipediaの記事が実在すると確認できた場合のみ付ける
+  const sc = Science.answer(t);
+  if (sc) {
+    let extra = "";
+    if (sc.wiki) { try { const r = await getJSON("https://ja.wikipedia.org/api/rest_v1/page/summary/" + encodeURIComponent(sc.wiki)); const u = r && r.content_urls && r.content_urls.desktop && r.content_urls.desktop.page; if (u) extra = `\n\n詳しい解説(Wikipedia): ${u}\n取得日: ${today()}`; } catch (e) { /* 通信できなければ出典なしで答える */ } }
+    return sc.text + extra;
+  }
+  const pi = Papers.intent(t);                  // 論文・DOI
+  if (pi) { try { return await Papers.run(pi, getJSON); } catch (e) { return "論文データベースに接続できませんでした（" + (e.name === "AbortError" ? "タイムアウト" : e.message) + "）。通信状況を確認してもう一度試してください。"; } }
   const tr = await Tools.answer(t);           // 通信なしで答えられるもの（計算・単位・日付・知識辞典など）
   if (tr) return tr.text + (tr.refs ? "\n\n参考: " + tr.refs.join("\n") : "");
   for (const [re, fn] of local) { const m = re.exec(t); if (m) return fn(t, m); }
@@ -183,7 +194,7 @@ async function submit(text) {
 }
 function chips() {
   const c = document.createElement("div"); c.className = "chips";
-  for (const s of ["光合成とは", "東京の天気", "5kmは何マイル", "2026/12/25まで何日", "360を素因数分解", "原子番号26", "git rebaseとは", "次の祝日はいつ"]) {
+  for (const s of ["光合成とは", "東京の天気", "5kmは何マイル", "2026/12/25まで何日", "360を素因数分解", "原子番号26", "git rebaseとは", "地球の脱出速度", "シュレーディンガー方程式", "graphene の論文を探して"]) {
     const b = document.createElement("button"); b.textContent = s; b.onclick = () => submit(s); c.appendChild(b);
   }
   log.appendChild(c);
