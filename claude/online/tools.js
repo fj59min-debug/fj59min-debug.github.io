@@ -88,7 +88,12 @@ addU("体積", "リットル(L)", 1, ["リットル", "l"]);
 addU("体積", "ミリリットル(mL)", 0.001, ["ミリリットル", "ml"]);
 addU("体積", "立方メートル(m³)", 1000, ["立方メートル", "m3", "m³", "㎥"]);
 addU("体積", "ガロン(米)", 3.785411784, ["ガロン", "gallons", "gallon", "gal"]);
-addU("体積", "米カップ", 0.2365882365, ["カップ"]);
+addU("体積", "カップ(日本の計量カップ200mL)", 0.2, ["カップ"]);
+addU("体積", "米カップ(約236.6mL)", 0.2365882365, ["米カップ", "usカップ"]);
+addU("体積", "大さじ(15mL)", 0.015, ["大さじ"]);
+addU("体積", "小さじ(5mL)", 0.005, ["小さじ"]);
+addU("体積", "合(尺貫法)", 0.18039, ["合"]);
+addU("体積", "升(尺貫法)", 1.8039, ["升"]);
 addU("面積", "平方メートル(m²)", 1, ["平方メートル", "m2", "m²", "㎡"]);
 addU("面積", "平方キロメートル(km²)", 1e6, ["平方キロメートル", "km2", "km²", "㎢"]);
 addU("面積", "ヘクタール(ha)", 10000, ["ヘクタール", "ha"]);
@@ -506,6 +511,130 @@ function knowledgeAnswer(t0) {
   return null;
 }
 
+// ---------- 追加: 日本の祝日（2022〜2099年。国民の祝日に関する法律の規定を計算で再現） ----------
+const HOLI_RANGE = [2022, 2099];
+function nthMonday(y, m, n) { const off = (1 - dow(y, m, 1) + 7) % 7; return 1 + off + 7 * (n - 1); }
+function equinox(y, spring) {                  // 1980〜2099年に使われる近似式
+  const base = spring ? 20.8431 : 23.2488;
+  return Math.floor(base + 0.242194 * (y - 1980) - Math.floor((y - 1980) / 4));
+}
+const holidayCache = {};
+function holidaysOf(y) {
+  if (holidayCache[y]) return holidayCache[y];
+  const H = new Map();                         // dayNum -> 名前
+  const add = (m, d, name) => H.set(dayNum(y, m, d), name);
+  add(1, 1, "元日"); add(1, nthMonday(y, 1, 2), "成人の日"); add(2, 11, "建国記念の日"); add(2, 23, "天皇誕生日");
+  add(3, equinox(y, true), "春分の日"); add(4, 29, "昭和の日"); add(5, 3, "憲法記念日"); add(5, 4, "みどりの日"); add(5, 5, "こどもの日");
+  add(7, nthMonday(y, 7, 3), "海の日"); add(8, 11, "山の日"); add(9, nthMonday(y, 9, 3), "敬老の日"); add(9, equinox(y, false), "秋分の日");
+  add(10, nthMonday(y, 10, 2), "スポーツの日"); add(11, 3, "文化の日"); add(11, 23, "勤労感謝の日");
+  const base = [...H.keys()].sort((a, b) => a - b);
+  for (const d of base) {                      // 国民の休日: 前日と翌日が祝日の平日(日曜以外)
+    const nx = d + 2;
+    if (H.has(nx) && !H.has(d + 1) && fromDayNum(d + 1) && dow(...fromDayNum(d + 1)) !== 0) H.set(d + 1, "国民の休日");
+  }
+  for (const d of [...H.keys()].sort((a, b) => a - b)) {   // 振替休日: 日曜の祝日の次の「祝日でない日」
+    if (H.get(d) !== "国民の休日" && dow(...fromDayNum(d)) === 0) { let k = d + 1; while (H.has(k)) k++; H.set(k, "振替休日"); }
+  }
+  return (holidayCache[y] = [...H.entries()].sort((a, b) => a[0] - b[0]).map(([n, name]) => ({ ymd: fromDayNum(n), n, name })));
+}
+const LAW = "https://laws.e-gov.go.jp/law/323AC1000000178";
+function holidayAnswer(t0, now) {
+  const t = zen2han(t0);
+  if (!/(祝日|休日|成人の日|建国記念の日|天皇誕生日|春分の日|昭和の日|憲法記念日|みどりの日|こどもの日|海の日|山の日|敬老の日|秋分の日|スポーツの日|文化の日|勤労感謝の日|元日|振替)/.test(t)) return null;
+  const [ty] = todayOf(now);
+  const ym = /(\d{4})\s*年/.exec(t);
+  let y = ym ? +ym[1] : /来年/.test(t) ? ty + 1 : /去年|昨年/.test(t) ? ty - 1 : ty;
+  const out = (text) => ({ text, refs: [LAW] });
+  if (y < HOLI_RANGE[0] || y > HOLI_RANGE[1]) return { text: `祝日の計算は ${HOLI_RANGE[0]}〜${HOLI_RANGE[1]}年に対応しています（それ以前は法改正や特例が多いため対象外です）。` };
+  const pd = /(\d{4})\s*[年\/\-.]\s*(\d{1,2})\s*[月\/\-.]\s*(\d{1,2})/.exec(t);
+  if (pd && /祝日|休日/.test(t)) {
+    const ymd = [+pd[1], +pd[2], +pd[3]];
+    if (!validYMD(ymd)) return { text: "存在しない日付です。" };
+    if (ymd[0] < HOLI_RANGE[0] || ymd[0] > HOLI_RANGE[1]) return { text: `祝日の計算は ${HOLI_RANGE[0]}〜${HOLI_RANGE[1]}年に対応しています。` };
+    const h = holidaysOf(ymd[0]).find(x => x.n === dayNum(...ymd));
+    return out(h ? `${dstr(...ymd)} は祝日（休日）です: ${h.name}` : `${dstr(...ymd)} は祝日ではありません${dow(...ymd) === 0 || dow(...ymd) === 6 ? "（週末です）" : "（平日です）"}。`);
+  }
+  if (/(次|つぎ|直近|これから)/.test(t)) {
+    const tn = dayNum(...todayOf(now));
+    for (let yy = ty; yy <= Math.min(ty + 1, HOLI_RANGE[1]); yy++) { const h = holidaysOf(yy).find(x => x.n > tn); if (h) return out(`次の祝日は ${dstr(...h.ymd)} の「${h.name}」です（あと${h.n - tn}日）。`); }
+  }
+  const nameQ = ["成人の日", "建国記念の日", "天皇誕生日", "春分の日", "昭和の日", "憲法記念日", "みどりの日", "こどもの日", "海の日", "山の日", "敬老の日", "秋分の日", "スポーツの日", "文化の日", "勤労感謝の日", "元日", "振替休日", "国民の休日"].find(n => t.includes(n));
+  if (nameQ) {
+    const hs = holidaysOf(y).filter(x => x.name === nameQ);
+    if (hs.length) return out(`${y}年の${nameQ}は ${hs.map(h => dstr(...h.ymd)).join("、")} です。`);
+  }
+  if (/祝日/.test(t) || (ym && /休日/.test(t))) return out(`${y}年の祝日（${holidaysOf(y).length}日）:\n` + holidaysOf(y).map(h => `${h.ymd[1]}/${h.ymd[2]}(${WD[dow(...h.ymd)]}) ${h.name}`).join("\n"));
+  return null;
+}
+
+// ---------- 追加: 世界の国と首都・その他の知識 ----------
+const COUNTRY = ("日本,東京;中国,北京;韓国,ソウル;北朝鮮,平壌;モンゴル,ウランバートル;インド,ニューデリー;パキスタン,イスラマバード;バングラデシュ,ダッカ;ネパール,カトマンズ;スリランカ,スリジャヤワルダナプラコッテ（行政上の首都。最大都市はコロンボ）;" +
+  "タイ,バンコク;ベトナム,ハノイ;ラオス,ビエンチャン;カンボジア,プノンペン;ミャンマー,ネピドー;マレーシア,クアラルンプール;シンガポール,シンガポール;フィリピン,マニラ;" +
+  "オーストラリア,キャンベラ;ニュージーランド,ウェリントン;アメリカ,ワシントンD.C.;カナダ,オタワ;メキシコ,メキシコシティ;ブラジル,ブラジリア;アルゼンチン,ブエノスアイレス;チリ,サンティアゴ;ペルー,リマ;コロンビア,ボゴタ;" +
+  "イギリス,ロンドン;フランス,パリ;ドイツ,ベルリン;イタリア,ローマ;スペイン,マドリード;ポルトガル,リスボン;オランダ,アムステルダム;ベルギー,ブリュッセル;スイス,ベルン;オーストリア,ウィーン;" +
+  "スウェーデン,ストックホルム;ノルウェー,オスロ;フィンランド,ヘルシンキ;デンマーク,コペンハーゲン;アイスランド,レイキャビク;アイルランド,ダブリン;ポーランド,ワルシャワ;チェコ,プラハ;ハンガリー,ブダペスト;ギリシャ,アテネ;" +
+  "トルコ,アンカラ;ロシア,モスクワ;ウクライナ,キーウ;サウジアラビア,リヤド;イラン,テヘラン;イラク,バグダッド;アラブ首長国連邦,アブダビ;カタール,ドーハ;" +
+  "エジプト,カイロ;南アフリカ,プレトリア（行政の首都。立法はケープタウン、司法はブルームフォンテーン）;ナイジェリア,アブジャ;ケニア,ナイロビ;エチオピア,アディスアベバ;モロッコ,ラバト")
+  .split(";").map(x => { const [name, cap] = x.split(","); return { name, cap }; });
+const PLANETS = ["水星", "金星", "地球", "火星", "木星", "土星", "天王星", "海王星"];
+const IRREG = ("be,was/were,been;go,went,gone;do,did,done;have,had,had;see,saw,seen;take,took,taken;make,made,made;get,got,got/gotten;give,gave,given;come,came,come;run,ran,run;eat,ate,eaten;write,wrote,written;read,read,read;speak,spoke,spoken;" +
+  "buy,bought,bought;bring,brought,brought;think,thought,thought;teach,taught,taught;catch,caught,caught;know,knew,known;begin,began,begun;drink,drank,drunk;sing,sang,sung;swim,swam,swum;choose,chose,chosen;break,broke,broken;forget,forgot,forgotten;" +
+  "find,found,found;leave,left,left;meet,met,met;tell,told,told;say,said,said;sit,sat,sat;stand,stood,stood;understand,understood,understood;keep,kept,kept;feel,felt,felt;hold,held,held;lose,lost,lost;pay,paid,paid;send,sent,sent;build,built,built;" +
+  "fall,fell,fallen;fly,flew,flown;grow,grew,grown;draw,drew,drawn;wear,wore,worn;drive,drove,driven;ride,rode,ridden;sleep,slept,slept;sell,sold,sold;win,won,won;hear,heard,heard;put,put,put;cut,cut,cut;let,let,let;hit,hit,hit")
+  .split(";").map(x => { const [base, past, pp] = x.split(","); return { base, past, pp }; });
+const MONTH_JP = ["睦月", "如月", "弥生", "卯月", "皐月", "水無月", "文月", "葉月", "長月", "神無月", "霜月", "師走"];
+const MONTH_EN = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const SI = [["ロナ", "R", 27], ["ヨタ", "Y", 24], ["ゼタ", "Z", 21], ["エクサ", "E", 18], ["ペタ", "P", 15], ["テラ", "T", 12], ["ギガ", "G", 9], ["メガ", "M", 6], ["キロ", "k", 3], ["ヘクト", "h", 2], ["デカ", "da", 1],
+  ["デシ", "d", -1], ["センチ", "c", -2], ["ミリ", "m", -3], ["マイクロ", "μ", -6], ["ナノ", "n", -9], ["ピコ", "p", -12], ["フェムト", "f", -15], ["アト", "a", -18], ["ゼプト", "z", -21], ["ヨクト", "y", -24], ["ロント", "r", -27]];
+const CONST = [
+  [/光速/, "真空中の光の速さ c = 299 792 458 m/s（定義値・厳密）"],
+  [/重力加速度/, "標準重力加速度 gₙ = 9.80665 m/s²（定義値）"],
+  [/アボガドロ/, "アボガドロ定数 Nₐ = 6.022 140 76 × 10²³ /mol（2019年改定SIの定義値・厳密）"],
+  [/プランク定数/, "プランク定数 h = 6.626 070 15 × 10⁻³⁴ J·s（定義値・厳密）"],
+  [/ボルツマン/, "ボルツマン定数 k = 1.380 649 × 10⁻²³ J/K（定義値・厳密）"],
+  [/電気素量|素電荷/, "電気素量 e = 1.602 176 634 × 10⁻¹⁹ C（定義値・厳密）"],
+  [/円周率|パイ|π/, "円周率 π = 3.14159265358979323846…"],
+  [/ネイピア数|自然対数の底/, "ネイピア数 e = 2.71828182845904523536…"],
+  [/黄金比/, "黄金比 φ = (1+√5)/2 = 1.6180339887498948482…"],
+];
+const SI_REF = "https://www.bipm.org/en/measurement-units";
+function toRoman(n) { const a = [[1000, "M"], [900, "CM"], [500, "D"], [400, "CD"], [100, "C"], [90, "XC"], [50, "L"], [40, "XL"], [10, "X"], [9, "IX"], [5, "V"], [4, "IV"], [1, "I"]]; let r = ""; for (const [v, s] of a) while (n >= v) { r += s; n -= v; } return r; }
+function fromRoman(s) { const v = { I: 1, V: 5, X: 10, L: 50, C: 100, D: 500, M: 1000 }; let r = 0; for (let i = 0; i < s.length; i++) { const c = v[s[i]], nx = v[s[i + 1]] || 0; r += c < nx ? -c : c; } return r; }
+
+function extraAnswer(t0) {
+  const t = zen2han(t0); let m;
+  // 料理の計量
+  if ((m = /(大さじ|小さじ)\s*(\d+(?:\.\d+)?)(?:\s*\/\s*(\d+))?\s*(?:杯)?/.exec(t)) && /(ml|cc|ミリ|グラム|何|いくつ|cc)/i.test(t)) {
+    const unit = m[1] === "大さじ" ? 15 : 5, k = m[3] ? +m[2] / +m[3] : +m[2];
+    return { text: `${m[1]}${m[3] ? m[2] + "/" + m[3] : m[2]} = ${fmt(unit * k)} mL（大さじ1=15mL、小さじ1=5mL、1カップ=200mL）` };
+  }
+  // ローマ数字
+  if ((m = /(\d{1,4})\s*(?:を|は)?\s*ローマ数字/.exec(t))) { const n = +m[1]; return n >= 1 && n <= 3999 ? { text: `${n} = ${toRoman(n)}` } : { text: "ローマ数字は1〜3999で表せます。" }; }
+  if ((m = /\b([IVXLCDM]{1,15})\b/.exec(t)) && /(ローマ数字|アラビア数字|数字に|いくつ)/.test(t)) { const n = fromRoman(m[1]); return toRoman(n) === m[1] ? { text: `${m[1]} = ${n}` } : { text: `「${m[1]}」は正しいローマ数字の並びではありません。` }; }
+  // 国と首都
+  const cn = COUNTRY.slice().sort((a, b) => b.name.length - a.name.length).find(c => t.includes(c.name));
+  if (cn && /(首都|都)/.test(t) && !/(都道府県|東京都)/.test(t.replace(cn.name, ""))) return { text: `${cn.name}の首都は ${cn.cap} です。` };
+  if ((m = /([一-龥ァ-ヶー]{2,10}?)は(?:どこの国|何という国|どの国)の(?:首都|都市)/.exec(t))) { const c = COUNTRY.find(x => x.cap.replace(/（.*/, "") === m[1]); if (c) return { text: `${m[1]}は ${c.name} の首都です。` }; }
+  if (/惑星/.test(t) && /(順|いくつ|何個|一覧|太陽系)/.test(t)) return { text: `太陽系の惑星は8つで、太陽に近い順に ${PLANETS.join("、")} です。`, refs: [] };
+  // 英語
+  if (/(不規則動詞)/.test(t) && !/[a-z]{2,}/i.test(t.replace(/不規則動詞/g, ""))) return { text: "不規則動詞の例（原形-過去形-過去分詞）:\n" + IRREG.slice(0, 20).map(v => `${v.base} - ${v.past} - ${v.pp}`).join("\n") + "\n動詞を入れて「goの過去形」のように聞くと個別に答えます。（全" + IRREG.length + "語収録）" };
+  if (/(過去形|過去分詞|活用|不規則)/.test(t)) {
+    const w = (/([a-z]+)/i.exec(t) || [])[1]; const v = w && IRREG.find(x => x.base === w.toLowerCase() || x.past.split("/").includes(w.toLowerCase()) || x.pp.split("/").includes(w.toLowerCase()));
+    if (v) return { text: `${v.base}（原形）- ${v.past}（過去形）- ${v.pp}（過去分詞）` };
+  }
+  // 月の名前
+  if ((m = /(\d{1,2})\s*月.*(英語|和風|旧暦|異名|呼び名|別名)/.exec(t)) && +m[1] >= 1 && +m[1] <= 12) {
+    const i = +m[1] - 1; return { text: `${m[1]}月 — 英語: ${MONTH_EN[i]} / 和風月名（旧暦の異名）: ${MONTH_JP[i]}` };
+  }
+  if (/和風月名|旧暦の月/.test(t)) return { text: MONTH_JP.map((n, i) => `${i + 1}月 ${n}`).join("、") };
+  // SI接頭語
+  if (/(接頭語|接頭辞)/.test(t)) return { text: "SI接頭語:\n" + SI.map(([n, s, e]) => `${n}(${s}) = 10^${e}`).join("\n"), refs: [SI_REF] };
+  const si = SI.find(([n]) => t.includes(n)) ; if (si && /(10の何乗|何倍|いくつ|倍率)/.test(t)) return { text: `${si[0]}(${si[1]}) = 10^${si[2]}`, refs: [SI_REF] };
+  // 物理定数
+  const c = CONST.find(([re]) => re.test(t)); if (c && t.length <= 24 && /(とは|いくつ|値|教えて|は|何)/.test(t)) return { text: c[1], refs: /定義値/.test(c[1]) ? [SI_REF] : [] };
+  return null;
+}
+
 // ---------- 入口 ----------
 async function answer(text, now) {
   now = now || new Date();
@@ -513,7 +642,9 @@ async function answer(text, now) {
   if (!t) return null;
   for (const fn of [
     () => dateAnswer(t, now),
+    () => holidayAnswer(t, now),
     () => clockAnswer(t, now),
+    () => extraAnswer(t),
     () => mathAnswer(t),
     () => convertUnits(t),
     () => textAnswer(t, now),
@@ -526,6 +657,6 @@ async function answer(text, now) {
   return null;
 }
 
-const api = { answer, calc, convertUnits, dateAnswer, mathAnswer, knowledgeAnswer, ELEMENTS, PREF, HTTP, KB, eto, factorize };
+const api = { holidaysOf, answer, calc, convertUnits, dateAnswer, mathAnswer, knowledgeAnswer, ELEMENTS, PREF, HTTP, KB, eto, factorize };
 if (typeof module !== "undefined" && module.exports) module.exports = api; else root.Tools = api;
 })(typeof window !== "undefined" ? window : globalThis);
