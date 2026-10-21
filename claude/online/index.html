@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude 風チャット（ネット検索版）</title>
+<style>
+  :root { --bg:#faf9f5; --fg:#1f1e1d; --muted:#6b6a68; --card:#fff; --line:#e4e1d8; --accent:#c96442; --user:#efe9dc; --link:#1a5fb4; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#262624; --fg:#eeece6; --muted:#a09d96; --card:#30302e; --line:#444441; --accent:#d97757; --user:#3a3835; --link:#8ab4f8; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.65 system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif; height:100dvh; display:flex; flex-direction:column; }
+  header { padding:10px 16px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0 auto 0 0; } header h1 span { color:var(--accent); }
+  .badge { font-size:12px; color:var(--muted); border:1px solid var(--line); border-radius:99px; padding:1px 10px; }
+  button, input { font:inherit; color:inherit; background:var(--card); border:1px solid var(--line); border-radius:8px; padding:6px 12px; }
+  button { cursor:pointer; } button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  #log { flex:1; overflow-y:auto; padding:16px; }
+  .msg { max-width:760px; margin:0 auto 14px; padding:10px 14px; border-radius:12px; white-space:pre-wrap; word-break:break-word; }
+  .msg.user { background:var(--user); }
+  .msg a { color:var(--link); }
+  .chips { max-width:760px; margin:0 auto 14px; display:flex; flex-wrap:wrap; gap:6px; }
+  .chips button { font-size:14px; }
+  form { display:flex; gap:8px; padding:12px 16px; border-top:1px solid var(--line); max-width:792px; width:100%; margin:0 auto; }
+  form input { flex:1; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span>✻</span> Claude 風チャット</h1>
+  <span class="badge">ネット検索版・APIキー不要</span>
+  <button id="reset">リセット</button>
+</header>
+<main id="log" aria-live="polite"></main>
+<form id="form">
+  <input id="input" autocomplete="off" placeholder="質問を入力（例: 光合成とは / 東京の天気）">
+  <button class="primary" type="submit">送信</button>
+</form>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const log = $("log"), input = $("input");
+const mem = { name: null };
+let busy = false;
+
+const pick = a => a[Math.floor(Math.random() * a.length)];
+const pad = n => String(n).padStart(2, "0");
+const today = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; };
+
+// ---------- 通信 ----------
+async function getJSON(url, ms = 8000) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), ms);
+  try {
+    const res = await fetch(url, { signal: ac.signal });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    return await res.json();
+  } finally { clearTimeout(timer); }
+}
+
+// Wikipedia（日本語版）: 検索 → 要約。CORSは origin=* で許可される
+// https://www.mediawiki.org/wiki/API:Cross-site_requests
+async function wikiAnswer(query) {
+  const sUrl = "https://ja.wikipedia.org/w/api.php?action=query&list=search&format=json&origin=*&srlimit=1&srsearch=" + encodeURIComponent(query);
+  const s = await getJSON(sUrl);
+  const hit = s && s.query && s.query.search && s.query.search[0];
+  if (!hit) return null;
+  const sum = await getJSON("https://ja.wikipedia.org/api/rest_v1/page/summary/" + encodeURIComponent(hit.title));
+  if (!sum || !sum.extract) return null;
+  const page = (sum.content_urls && sum.content_urls.desktop && sum.content_urls.desktop.page) ||
+               "https://ja.wikipedia.org/wiki/" + encodeURIComponent(hit.title);
+  let body = sum.extract;
+  if (body.length > 320) {
+    const cut = body.lastIndexOf("。", 320);
+    body = cut > 80 ? body.slice(0, cut + 1) : body.slice(0, 320) + "…";
+  }
+  const note = sum.type === "disambiguation" ? "（複数の意味がある言葉のようです。もっと具体的に聞くと絞れます）\n" : "";
+  return `「${sum.title}」について:\n${note}${body}\n\n出典: ${page}\n取得日: ${today()}`;
+}
+
+// 天気: Open-Meteo（キー不要・CORS可） https://open-meteo.com/en/docs
+const WMO = { 0:"快晴",1:"晴れ",2:"一部くもり",3:"くもり",45:"霧",48:"霧",51:"弱い霧雨",53:"霧雨",55:"強い霧雨",61:"弱い雨",63:"雨",65:"強い雨",
+  71:"弱い雪",73:"雪",75:"強い雪",80:"にわか雨",81:"にわか雨",82:"激しいにわか雨",95:"雷雨",96:"雷雨(ひょう)",99:"雷雨(ひょう)" };
+async function weatherAnswer(place) {
+  const g = await getJSON("https://geocoding-api.open-meteo.com/v1/search?count=1&language=ja&name=" + encodeURIComponent(place));
+  const loc = g && g.results && g.results[0];
+  if (!loc) return `「${place}」という地名は見つかりませんでした。`;
+  const fUrl = `https://api.open-meteo.com/v1/forecast?latitude=${loc.latitude}&longitude=${loc.longitude}` +
+    `&current=temperature_2m,weather_code&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max` +
+    `&timezone=auto&forecast_days=3`;
+  const f = await getJSON(fUrl);
+  const w = c => WMO[c] || `天気コード${c}`;
+  const days = ["今日", "明日", "明後日"];
+  const lines = f.daily.time.map((t, i) =>
+    `${days[i]}(${t.slice(5)}): ${w(f.daily.weather_code[i])} ${Math.round(f.daily.temperature_2m_min[i])}〜${Math.round(f.daily.temperature_2m_max[i])}℃ 降水確率${f.daily.precipitation_probability_max[i] ?? "-"}%`);
+  const where = [loc.name, loc.admin1, loc.country].filter(Boolean).join(" / ");
+  return `${where} の天気:\n現在 ${w(f.current.weather_code)} ${Math.round(f.current.temperature_2m)}℃\n${lines.join("\n")}\n\n出典: ${fUrl}\n取得日: ${today()}`;
+}
+
+// ---------- オフラインで即答できるもの ----------
+function calc(src) {
+  const s = src.replace(/[×x＊*]/g, "*").replace(/[÷／/]/g, "/").replace(/[＋+]/g, "+").replace(/[－ー−-]/g, "-")
+               .replace(/（/g, "(").replace(/）/g, ")").replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0)).replace(/\s+/g, "");
+  if (!/^[0-9.+\-*/()]+$/.test(s)) return null;
+  let i = 0;
+  const peek = () => s[i];
+  function expr() { let v = term(); while (peek() === "+" || peek() === "-") { const o = s[i++]; const r = term(); v = o === "+" ? v + r : v - r; } return v; }
+  function term() { let v = factor(); while (peek() === "*" || peek() === "/") { const o = s[i++]; const r = factor(); v = o === "*" ? v * r : v / r; } return v; }
+  function factor() {
+    if (peek() === "-") { i++; return -factor(); }
+    if (peek() === "(") { i++; const v = expr(); if (s[i++] !== ")") throw 0; return v; }
+    const m = /^[0-9]+(\.[0-9]+)?/.exec(s.slice(i));
+    if (!m) throw 0;
+    i += m[0].length; return parseFloat(m[0]);
+  }
+  try { const v = expr(); return i === s.length && isFinite(v) ? v : null; } catch { return null; }
+}
+
+const local = [
+  [/(私|僕|俺|わたし)の名前は?[?？]$|名前.*(覚えて|わかる)/, () => mem.name ? `${mem.name}さん、ですよね。` : "まだ教えてもらっていません。教えてもらえますか？"],
+  [/(名前は|の名前は).*(です|だよ)|^(名前は)/, t => {
+    const m = /([^\sは、。]{1,12})(です|だよ|といいます|と申します)/.exec(t);
+    if (m) { mem.name = m[1]; return `${mem.name}さん、はじめまして。覚えておきますね。`; }
+    return "お名前を教えてください。「私の名前はタロウです」のように書いてください。";
+  }],
+  [/^(こんにちは|こんばんは|おはよう|はじめまして|やあ|hello|hi)[!！。]?$/i, () => pick(["こんにちは！何を調べましょうか？", "こんにちは。気になることを聞いてください。"])],
+  [/ありがとう|感謝|助かった/, () => "どういたしまして！"],
+  [/あなた.*(誰|だれ|何者)|自己紹介/, () => "ブラウザ上で動く Claude 風のボットです。本物のClaudeやAIモデルではなく、Wikipedia と Open-Meteo をネットで検索して答える仕組みです。答えには出典URLと取得日を付けます。"],
+  [/できること|使い方|ヘルプ|help/i, () => "・調べもの: 「光合成とは」「織田信長について」\n・天気: 「大阪の天気」\n・計算: 「12*(3+4)は？」\n・時刻/日付: 「今何時？」\n・サイコロ / コイン / おみくじ\n調べものの答えはWikipediaの要約で、出典URLを付けます。"],
+  [/^(今|いま)?何時|時刻/, () => { const d = new Date(); return `今は ${pad(d.getHours())}:${pad(d.getMinutes())} です。`; }],
+  [/何日|日付|今日は|曜日/, () => { const d = new Date(); return `今日は ${d.getFullYear()}年${d.getMonth()+1}月${d.getDate()}日（${"日月火水木金土"[d.getDay()]}曜日）です。`; }],
+  [/サイコロ|ダイス/, () => `🎲 ${1 + Math.floor(Math.random() * 6)} が出ました。`],
+  [/コイン/, () => `🪙 ${pick(["表", "裏"])}です。`],
+  [/おみくじ|運勢/, () => `おみくじ: ${pick(["大吉", "中吉", "小吉", "吉", "末吉", "凶"])}`],
+  [/さようなら|バイバイ|またね|おやすみ/, () => "また話しましょう。"],
+];
+
+// 質問文から調べる言葉だけを取り出す
+function topicOf(t) {
+  return t.replace(/[?？!！。]+$/g, "")
+          .replace(/(について|に関して)?(教えて|説明して|知りたい|調べて|詳しく)(ください|くれ|ほしい)?$/, "")
+          .replace(/(って|とは|は|を)(何|なに|誰|だれ|どんな.*|いつ|どこ)?(ですか|でしょうか|なの|だっけ)?$/, "")
+          .replace(/について$/, "").trim();
+}
+
+async function reply(text) {
+  const t = text.trim();
+  if (/[0-9０-９]/.test(t) && /[+\-*/×÷＋－＊／()（）x]/.test(t)) {
+    const e = t.replace(/(は|を|って|=|＝|？|\?|計算して|いくつ|答え|ですか|[。、])/g, "");
+    const v = calc(e);
+    if (v !== null) return `${e} = ${Math.round(v * 1e10) / 1e10}`;
+  }
+  for (const [re, fn] of local) { const m = re.exec(t); if (m) return fn(t, m); }
+
+  try {
+    const w = /^(.{1,20}?)の?(天気|気温|天候|予報)/.exec(t);
+    if (w) return await weatherAnswer(w[1].replace(/(今日|明日|明後日|現在|今)の?/g, "").replace(/[はのでが、]$/, ""));
+    const topic = topicOf(t);
+    if (topic.length >= 2) {
+      const a = await wikiAnswer(topic);
+      if (a) return a;
+      return `「${topic}」に合う記事がWikipediaで見つかりませんでした。言い方を変えて試してください。`;
+    }
+    return "もう少し具体的に教えてください。調べたい言葉を入れてもらえると検索できます。";
+  } catch (e) {
+    return "ネットに接続できませんでした（" + (e.name === "AbortError" ? "タイムアウト" : e.message) + "）。通信状況を確認してもう一度試してください。";
+  }
+}
+
+// ---------- 画面 ----------
+const URL_RE = /(https?:\/\/[^\s]+)/g;
+function setText(el, text) {           // URLだけをリンクにする（HTMLとしては解釈しない）
+  el.textContent = "";
+  text.split(URL_RE).forEach((p, i) => {
+    if (i % 2) { const a = document.createElement("a"); a.href = p; a.textContent = p; a.target = "_blank"; a.rel = "noopener noreferrer"; el.appendChild(a); }
+    else el.appendChild(document.createTextNode(p));
+  });
+}
+function add(role, text) {
+  const d = document.createElement("div");
+  d.className = "msg " + role; d.textContent = text;
+  log.appendChild(d); log.scrollTop = log.scrollHeight; return d;
+}
+async function say(el, text) {
+  el.textContent = "";
+  const chars = [...text], step = Math.max(1, Math.ceil(chars.length / 150));
+  for (let i = 0; i < chars.length; i += step) {
+    el.textContent += chars.slice(i, i + step).join(""); log.scrollTop = log.scrollHeight;
+    await new Promise(r => setTimeout(r, 16));
+  }
+  setText(el, text);
+}
+async function submit(text) {
+  if (busy || !text.trim()) return;
+  busy = true;
+  add("user", text);
+  const d = add("assistant", "検索中…");
+  const ans = await reply(text);
+  await say(d, ans);
+  busy = false;
+}
+function chips() {
+  const c = document.createElement("div"); c.className = "chips";
+  for (const s of ["光合成とは", "織田信長について教えて", "東京の天気", "12*(3+4)は？", "今何時？", "おみくじ"]) {
+    const b = document.createElement("button"); b.textContent = s; b.onclick = () => submit(s); c.appendChild(b);
+  }
+  log.appendChild(c);
+}
+function start() {
+  log.innerHTML = ""; mem.name = null;
+  const d = add("assistant", "");
+  say(d, "こんにちは。ネットで調べて答える Claude 風ボットです（本物のAIではありません）。下のボタンか自由な質問をどうぞ。").then(chips);
+}
+$("form").onsubmit = e => { e.preventDefault(); const t = input.value; input.value = ""; submit(t); };
+$("reset").onclick = () => { if (!busy) start(); };
+start();
+</script>
+</body>
+</html>
