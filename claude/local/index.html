@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ローカルAIチャット</title>
+<style>
+  :root { --bg:#faf9f5; --fg:#1f1e1d; --muted:#6b6a68; --card:#fff; --line:#e4e1d8; --accent:#c96442; --user:#efe9dc; --link:#1a5fb4; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#262624; --fg:#eeece6; --muted:#a09d96; --card:#30302e; --line:#444441; --accent:#d97757; --user:#3a3835; --link:#8ab4f8; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.65 system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif; height:100dvh; display:flex; flex-direction:column; }
+  header { padding:10px 16px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0 auto 0 0; } header h1 span { color:var(--accent); }
+  select, button, input[type=text] { font:inherit; color:inherit; background:var(--card); border:1px solid var(--line); border-radius:8px; padding:6px 12px; }
+  button { cursor:pointer; } button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button:disabled, input:disabled { opacity:.5; cursor:default; }
+  #status { padding:8px 16px; font-size:13px; color:var(--muted); border-bottom:1px solid var(--line); }
+  #bar { height:4px; background:var(--line); } #bar i { display:block; height:100%; width:0; background:var(--accent); transition:width .2s; }
+  #log { flex:1; overflow-y:auto; padding:16px; }
+  .msg { max-width:760px; margin:0 auto 14px; padding:10px 14px; border-radius:12px; white-space:pre-wrap; word-break:break-word; }
+  .msg.user { background:var(--user); } .msg.note { color:var(--muted); font-size:14px; }
+  .msg a { color:var(--link); }
+  form { display:flex; gap:8px; padding:12px 16px; border-top:1px solid var(--line); max-width:792px; width:100%; margin:0 auto; }
+  form input { flex:1; }
+  label.t { font-size:13px; color:var(--muted); display:flex; align-items:center; gap:4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span>✻</span> ローカルAIチャット</h1>
+  <select id="model" aria-label="モデル"></select>
+  <button id="load" class="primary">モデルを読み込む</button>
+  <label class="t"><input type="checkbox" id="web" checked>ネット検索で補強</label>
+  <button id="reset" disabled>新しい会話</button>
+</header>
+<div id="bar"><i></i></div>
+<div id="status"></div>
+<main id="log" aria-live="polite"></main>
+<form id="form">
+  <input id="input" type="text" autocomplete="off" placeholder="先にモデルを読み込んでください" disabled>
+  <button id="send" class="primary" type="submit" disabled>送信</button>
+  <button id="stop" type="button" hidden>停止</button>
+</form>
+
+<script type="module">
+"use strict";
+const WEBLLM_URL = "https://esm.run/@mlc-ai/web-llm@0.2.86";   // https://github.com/mlc-ai/web-llm
+// モデルIDとメモリ量は web-llm の src/config.ts の prebuiltAppConfig に基づく
+const MODELS = [
+  ["gemma-2-2b-jpn-it-q4f16_1-MLC",   "Gemma 2 2B 日本語版（軽め・約1.9GB）"],
+  ["Qwen2.5-1.5B-Instruct-q4f16_1-MLC","Qwen2.5 1.5B（軽め・約1.6GB）"],
+  ["Qwen2.5-3B-Instruct-q4f16_1-MLC",  "Qwen2.5 3B（やや高性能・約2.5GB）"],
+  ["Llama-3.2-3B-Instruct-q4f16_1-MLC","Llama 3.2 3B（約2.3GB）"],
+];
+const SYSTEM = "あなたは親切で正確な日本語のアシスタントです。簡潔に、わかりやすく答えてください。" +
+  "【参考資料】が与えられたときは、その内容に基づいて答え、資料にないことは推測だと明示してください。" +
+  "わからないことはわからないと正直に答え、事実を作り上げないでください。";
+
+const $ = id => document.getElementById(id);
+const log = $("log"), input = $("input");
+let engine = null, history = [], busy = false;
+
+for (const [id, label] of MODELS) $("model").add(new Option(label, id));
+const pad = n => String(n).padStart(2, "0");
+const today = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; };
+const setStatus = t => $("status").textContent = t;
+const setBar = p => $("bar").firstElementChild.style.width = Math.round(p * 100) + "%";
+
+// ---------- ネット検索（CORS対応の公開API・キー不要） ----------
+async function getJSON(url, ms = 8000) {
+  const ac = new AbortController(), t = setTimeout(() => ac.abort(), ms);
+  try { const r = await fetch(url, { signal: ac.signal }); if (!r.ok) throw new Error("HTTP " + r.status); return await r.json(); }
+  finally { clearTimeout(t); }
+}
+async function wikiContext(q) {
+  const s = await getJSON("https://ja.wikipedia.org/w/api.php?action=query&list=search&format=json&origin=*&srlimit=1&srsearch=" + encodeURIComponent(q));
+  const hit = s?.query?.search?.[0]; if (!hit) return null;
+  const sum = await getJSON("https://ja.wikipedia.org/api/rest_v1/page/summary/" + encodeURIComponent(hit.title));
+  if (!sum?.extract) return null;
+  const url = sum.content_urls?.desktop?.page || "https://ja.wikipedia.org/wiki/" + encodeURIComponent(hit.title);
+  return { text: `Wikipedia「${sum.title}」: ${sum.extract.slice(0, 1500)}`, url };
+}
+const WMO = { 0:"快晴",1:"晴れ",2:"一部くもり",3:"くもり",45:"霧",48:"霧",51:"弱い霧雨",53:"霧雨",55:"強い霧雨",61:"弱い雨",63:"雨",65:"強い雨",71:"弱い雪",73:"雪",75:"強い雪",80:"にわか雨",81:"にわか雨",82:"激しいにわか雨",95:"雷雨",96:"雷雨(ひょう)",99:"雷雨(ひょう)" };
+async function weatherContext(place) {
+  const g = await getJSON("https://geocoding-api.open-meteo.com/v1/search?count=1&language=ja&name=" + encodeURIComponent(place));
+  const loc = g?.results?.[0]; if (!loc) return null;
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${loc.latitude}&longitude=${loc.longitude}&current=temperature_2m,weather_code&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=auto&forecast_days=3`;
+  const f = await getJSON(url), w = c => WMO[c] || `コード${c}`;
+  const days = f.daily.time.map((t, i) => `${t}: ${w(f.daily.weather_code[i])} ${Math.round(f.daily.temperature_2m_min[i])}〜${Math.round(f.daily.temperature_2m_max[i])}℃ 降水確率${f.daily.precipitation_probability_max[i] ?? "不明"}%`);
+  return { text: `${loc.name}(${loc.admin1 || ""})の天気。現在 ${w(f.current.weather_code)} ${Math.round(f.current.temperature_2m)}℃。\n${days.join("\n")}`, url };
+}
+function topicOf(t) {
+  return t.replace(/[?？!！。]+$/g, "")
+    .replace(/(について|に関して)?(教えて|説明して|知りたい|調べて|詳しく)(ください|くれ|ほしい)?$/, "")
+    .replace(/(って|とは|は|を)(何|なに|誰|だれ|どんな.*|いつ|どこ)?(ですか|でしょうか|なの|だっけ)?$/, "")
+    .replace(/について$/, "").trim();
+}
+// 検索が役立ちそうな質問だけ検索する（雑談や指示文では検索しない）
+async function gatherContext(text) {
+  const w = /^(.{1,20}?)の?(天気|気温|天候|予報)/.exec(text);
+  if (w) return weatherContext(w[1].replace(/(今日|明日|明後日|現在|今)の?/g, "").replace(/[はのでが、]$/, ""));
+  if (/(とは|って何|って誰|について|教えて|説明して|は誰|は何|とはなに|を調べて)/.test(text)) {
+    const topic = topicOf(text);
+    if (topic.length >= 2 && topic.length <= 30) return wikiContext(topic);
+  }
+  return null;
+}
+
+// ---------- モデル読み込み ----------
+$("load").onclick = async () => {
+  if (!navigator.gpu) { setStatus("このブラウザはWebGPUに対応していません。PCの最新のChromeかEdgeで開いてください。"); return; }
+  $("load").disabled = $("model").disabled = true;
+  setStatus("ライブラリを読み込み中…");
+  try {
+    const webllm = await import(WEBLLM_URL);
+    engine = await webllm.CreateMLCEngine($("model").value, {
+      initProgressCallback: p => { setBar(p.progress || 0); setStatus(p.text || "読み込み中…"); },
+    });
+    setStatus("準備完了。この端末の中で動いています（初回のみ大きなダウンロードがあり、2回目以降はキャッシュを使います）。");
+    setBar(1);
+    input.disabled = $("send").disabled = $("reset").disabled = false;
+    input.placeholder = "メッセージを入力"; input.focus();
+    note("小型モデルなので、ChatGPT や Claude の大規模モデルより性能は低めです。間違えることがあるので、大事な事実は出典で確認してください。");
+  } catch (e) {
+    setStatus("読み込みに失敗しました: " + (e?.message || e));
+    $("load").disabled = $("model").disabled = false;
+  }
+};
+
+// ---------- 画面 ----------
+const URL_RE = /(https?:\/\/[^\s]+)/g;
+function setText(el, text) {
+  el.textContent = "";
+  text.split(URL_RE).forEach((p, i) => {
+    if (i % 2) { const a = document.createElement("a"); a.href = p; a.textContent = p; a.target = "_blank"; a.rel = "noopener noreferrer"; el.appendChild(a); }
+    else el.appendChild(document.createTextNode(p));
+  });
+}
+function add(role, text) {
+  const d = document.createElement("div"); d.className = "msg " + role; d.textContent = text;
+  log.appendChild(d); log.scrollTop = log.scrollHeight; return d;
+}
+const note = t => add("note", t);
+
+$("reset").onclick = async () => { if (busy) return; history = []; log.innerHTML = ""; try { await engine?.resetChat(); } catch {} };
+$("stop").onclick = () => engine?.interruptGenerate();
+$("form").onsubmit = async e => {
+  e.preventDefault();
+  const text = input.value.trim();
+  if (!text || busy || !engine) return;
+  input.value = ""; busy = true; $("send").hidden = true; $("stop").hidden = false;
+  add("user", text);
+  const out = add("assistant", "考え中…");
+  let src = null;
+  if ($("web").checked) {
+    try { out.textContent = "ネットで調べています…"; src = await gatherContext(text); } catch { src = null; }
+  }
+  const userMsg = src ? `【参考資料】\n${src.text}\n\n【質問】\n${text}` : text;
+  const messages = [{ role: "system", content: SYSTEM }, ...history.slice(-8), { role: "user", content: userMsg }];
+  let acc = "";
+  try {
+    out.textContent = "";
+    const chunks = await engine.chat.completions.create({ messages, stream: true, temperature: 0.6, max_tokens: 1024 });
+    for await (const c of chunks) {
+      acc += c.choices[0]?.delta?.content || "";
+      out.textContent = acc; log.scrollTop = log.scrollHeight;
+    }
+    if (src) { acc += `\n\n出典: ${src.url}\n取得日: ${today()}`; }
+    setText(out, acc || "（応答がありませんでした）");
+    history.push({ role: "user", content: text }, { role: "assistant", content: acc });
+  } catch (err) {
+    out.textContent = "エラー: " + (err?.message || err);
+  } finally {
+    busy = false; $("send").hidden = false; $("stop").hidden = true; input.focus();
+  }
+};
+
+// テスト用に純粋関数を公開
+window.__test = { topicOf, gatherContext, wikiContext, weatherContext };
+</script>
+</body>
+</html>
