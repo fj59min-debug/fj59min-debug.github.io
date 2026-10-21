@@ -29,7 +29,7 @@
 <body>
 <header>
   <h1><span>✻</span> Claude 風チャット</h1>
-  <span class="badge">ネット検索版・APIキー不要</span>
+  <span class="badge">道具+知識+ネット検索・APIキー不要</span>
   <button id="reset">リセット</button>
 </header>
 <main id="log" aria-live="polite"></main>
@@ -38,6 +38,7 @@
   <button class="primary" type="submit">送信</button>
 </form>
 
+<script src="tools.js"></script>
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
@@ -100,24 +101,6 @@ async function weatherAnswer(place) {
 }
 
 // ---------- オフラインで即答できるもの ----------
-function calc(src) {
-  const s = src.replace(/[×x＊*]/g, "*").replace(/[÷／/]/g, "/").replace(/[＋+]/g, "+").replace(/[－ー−-]/g, "-")
-               .replace(/（/g, "(").replace(/）/g, ")").replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0)).replace(/\s+/g, "");
-  if (!/^[0-9.+\-*/()]+$/.test(s)) return null;
-  let i = 0;
-  const peek = () => s[i];
-  function expr() { let v = term(); while (peek() === "+" || peek() === "-") { const o = s[i++]; const r = term(); v = o === "+" ? v + r : v - r; } return v; }
-  function term() { let v = factor(); while (peek() === "*" || peek() === "/") { const o = s[i++]; const r = factor(); v = o === "*" ? v * r : v / r; } return v; }
-  function factor() {
-    if (peek() === "-") { i++; return -factor(); }
-    if (peek() === "(") { i++; const v = expr(); if (s[i++] !== ")") throw 0; return v; }
-    const m = /^[0-9]+(\.[0-9]+)?/.exec(s.slice(i));
-    if (!m) throw 0;
-    i += m[0].length; return parseFloat(m[0]);
-  }
-  try { const v = expr(); return i === s.length && isFinite(v) ? v : null; } catch { return null; }
-}
-
 const local = [
   [/(私|僕|俺|わたし)の名前は?[?？]$|名前.*(覚えて|わかる)/, () => mem.name ? `${mem.name}さん、ですよね。` : "まだ教えてもらっていません。教えてもらえますか？"],
   [/(名前は|の名前は).*(です|だよ)|^(名前は)/, t => {
@@ -128,7 +111,7 @@ const local = [
   [/^(こんにちは|こんばんは|おはよう|はじめまして|やあ|hello|hi)[!！。]?$/i, () => pick(["こんにちは！何を調べましょうか？", "こんにちは。気になることを聞いてください。"])],
   [/ありがとう|感謝|助かった/, () => "どういたしまして！"],
   [/あなた.*(誰|だれ|何者)|自己紹介/, () => "ブラウザ上で動く Claude 風のボットです。本物のClaudeやAIモデルではなく、Wikipedia と Open-Meteo をネットで検索して答える仕組みです。答えには出典URLと取得日を付けます。"],
-  [/できること|使い方|ヘルプ|help/i, () => "・調べもの: 「光合成とは」「織田信長について」\n・天気: 「大阪の天気」\n・計算: 「12*(3+4)は？」\n・時刻/日付: 「今何時？」\n・サイコロ / コイン / おみくじ\n調べものの答えはWikipediaの要約で、出典URLを付けます。"],
+  [/できること|使い方|ヘルプ|help/i, () => "【ネットで調べる】「光合成とは」「大阪の天気」\n【計算】「2^10」「sqrt(144)+1」「360を素因数分解」「12と18の最大公約数」「10の階乗」「200の15%」「5000円の20%オフ」\n【単位】「5kmは何マイル」「100°Fは何℃」「1GBは何MB」「1坪は何平方メートル」\n【日付】「2026/12/25は何曜日」「100日後」「令和7年は西暦何年」「2026年の干支」「1990年5月1日生まれは何歳」\n【世界時計】「ニューヨークは今何時」\n【文字】「「こんにちは」の文字数」「base64エンコード「…」」「sha256「abc」」「パスワードを16桁で生成」「uuid」\n【進数】「255を16進数に」\n【知識】「原子番号26」「愛知県の県庁所在地」「404とは」\n【プログラミング】「reduceとは」「git rebase」「Pythonのリスト内包表記」「flexbox」"],
   [/^(今|いま)?何時|時刻/, () => { const d = new Date(); return `今は ${pad(d.getHours())}:${pad(d.getMinutes())} です。`; }],
   [/何日|日付|今日は|曜日/, () => { const d = new Date(); return `今日は ${d.getFullYear()}年${d.getMonth()+1}月${d.getDate()}日（${"日月火水木金土"[d.getDay()]}曜日）です。`; }],
   [/サイコロ|ダイス/, () => `🎲 ${1 + Math.floor(Math.random() * 6)} が出ました。`],
@@ -147,11 +130,8 @@ function topicOf(t) {
 
 async function reply(text) {
   const t = text.trim();
-  if (/[0-9０-９]/.test(t) && /[+\-*/×÷＋－＊／()（）x]/.test(t)) {
-    const e = t.replace(/(は|を|って|=|＝|？|\?|計算して|いくつ|答え|ですか|[。、])/g, "");
-    const v = calc(e);
-    if (v !== null) return `${e} = ${Math.round(v * 1e10) / 1e10}`;
-  }
+  const tr = await Tools.answer(t);           // 通信なしで答えられるもの（計算・単位・日付・知識辞典など）
+  if (tr) return tr.text + (tr.refs ? "\n\n参考: " + tr.refs.join("\n") : "");
   for (const [re, fn] of local) { const m = re.exec(t); if (m) return fn(t, m); }
 
   try {
@@ -203,7 +183,7 @@ async function submit(text) {
 }
 function chips() {
   const c = document.createElement("div"); c.className = "chips";
-  for (const s of ["光合成とは", "織田信長について教えて", "東京の天気", "12*(3+4)は？", "今何時？", "おみくじ"]) {
+  for (const s of ["光合成とは", "東京の天気", "5kmは何マイル", "2026/12/25まで何日", "360を素因数分解", "原子番号26", "git rebaseとは", "ニューヨークは今何時"]) {
     const b = document.createElement("button"); b.textContent = s; b.onclick = () => submit(s); c.appendChild(b);
   }
   log.appendChild(c);
